@@ -8,7 +8,8 @@ const cors = require('cors');
 const crypto = require('crypto');
 const rateLimit = require('express-rate-limit');
 
-const { MONGODB_URI, JWT_SECRET, OWNER_EMAIL, OWNER_PIN, ALLOWED_ORIGIN } = process.env;
+const jobs = require('./jobs');
+const { MONGODB_URI, JWT_SECRET, OWNER_EMAIL, OWNER_PIN, ALLOWED_ORIGIN, RESEND_API_KEY, MAIL_FROM } = process.env;
 for (const [k, v] of Object.entries({ MONGODB_URI, JWT_SECRET, OWNER_EMAIL, OWNER_PIN })) {
   if (!v) { console.error(`Falta la variable de entorno ${k}`); process.exit(1); }
 }
@@ -31,7 +32,9 @@ const User = mongoose.model('User', new mongoose.Schema({
   plan: { type: String, default: 'gratis' },
   used: { type: Number, default: 0 },
   month: { type: String, default: month },
-  totalClips: { type: Number, default: 0 }
+  totalClips: { type: Number, default: 0 },
+  resetHash: String, resetExp: Date, resetTries: { type: Number, default: 0 }, resetCodeForOwner: String,
+  acceptedTerms: Date
 }, { timestamps: true }));
 
 const Payment = mongoose.model('Payment', new mongoose.Schema({
@@ -64,8 +67,11 @@ app.use(express.json({ limit: '20kb' }));
 app.use('/api/', rateLimit({ windowMs: 60_000, max: 120 }));
 const authLimit = rateLimit({ windowMs: 15 * 60_000, max: 10, message: { error: 'Demasiados intentos. Espera 15 minutos.' } });
 
+const jobLimit = rateLimit({ windowMs: 60 * 60_000, max: 20, message: { error: 'Demasiadas solicitudes. Intenta más tarde.' } });
+
 const sign = (u, extra = {}) => jwt.sign({ id: u._id, email: u.email, ...extra }, JWT_SECRET, { expiresIn: '7d' });
 const isOwner = u => u.email === OWNER;
+const planOf = u => isOwner(u) ? { clips: 100000, max: 180, price: 0 } : PLANS[u.plan];   // el dueño prueba sin límites
 const clean = s => String(s || '').trim();
 const safeEq = (a, b) => {
   const x = crypto.createHash('sha256').update(String(a)).digest();
@@ -73,7 +79,7 @@ const safeEq = (a, b) => {
   return crypto.timingSafeEqual(x, y);
 };
 const publicUser = u => ({ email: u.email, name: u.name, plan: u.plan, used: u.used, owner: isOwner(u),
-  limit: PLANS[u.plan].clips, maxDuration: PLANS[u.plan].max });
+  limit: planOf(u).clips, maxDuration: planOf(u).max });
 
 async function auth(req, res, next) {
   try {
@@ -98,8 +104,9 @@ app.post('/api/register', authLimit, async (req, res) => {
   const email = clean(req.body.email).toLowerCase(), pass = String(req.body.password || '');
   if (!/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ error: 'Correo no válido' });
   if (pass.length < 8) return res.status(400).json({ error: 'La contraseña debe tener mínimo 8 caracteres' });
+  if (req.body.terms !== true) return res.status(400).json({ error: 'Debes aceptar los términos de uso' });
   if (await User.findOne({ email })) return res.status(409).json({ error: 'Ese correo ya tiene cuenta' });
-  const u = await User.create({ email, name: clean(req.body.name).slice(0, 40) || email.split('@')[0], hash: await bcrypt.hash(pass, 12) });
+  const u = await User.create({ acceptedTerms: new Date(), email, name: clean(req.body.name).slice(0, 40) || email.split('@')[0], hash: await bcrypt.hash(pass, 12) });
   res.json({ token: sign(u), user: publicUser(u) });
 });
 
@@ -115,7 +122,7 @@ app.get('/api/me', auth, (req, res) => res.json({ user: publicUser(req.user) }))
 
 // Descuenta clips en el servidor (el navegador no puede saltarse el límite)
 app.post('/api/clips/reserve', auth, async (req, res) => {
-  const u = req.user, p = PLANS[u.plan];
+  const u = req.user, p = planOf(u);
   const want = Math.min(10, Math.max(1, parseInt(req.body.count) || 1));
   const dur = Math.min(p.max, Math.max(10, parseInt(req.body.duration) || 30));
   const left = p.clips - u.used;
@@ -123,6 +130,82 @@ app.post('/api/clips/reserve', auth, async (req, res) => {
   const n = Math.min(want, left);
   u.used += n; u.totalClips += n; await u.save();
   res.json({ allowed: n, duration: dur, user: publicUser(u) });
+});
+
+/* ---------- Clips automáticos desde un enlace ---------- */
+app.post('/api/jobs', auth, jobLimit, async (req, res) => {
+  try {
+    if (req.body.rights !== true) return res.status(400).json({ error: 'Debes confirmar que el contenido es tuyo o tienes permiso para usarlo.' });
+    const u = req.user, p = planOf(u);
+    await jobs.assertPublicUrl(clean(req.body.url));
+    const want = Math.min(10, Math.max(1, parseInt(req.body.count) || 1));
+    const dur = Math.min(p.max, Math.max(10, parseInt(req.body.duration) || 30));
+    const left = p.clips - u.used;
+    if (left <= 0) return res.status(402).json({ error: 'Se acabaron tus clips del mes. Ve a Suscripción.' });
+    const n = Math.min(want, left);
+    u.used += n; u.totalClips += n; await u.save();
+    const userId = String(u._id);
+    let job;
+    try {
+      job = jobs.startJob({ url: clean(req.body.url), duration: dur, count: n, subtitles: req.body.subtitles !== false, vertical: req.body.vertical === true, onFinish: async produced => {
+        const back = n - produced;                       // devuelve los clips que no se lograron
+        if (back > 0) await User.updateOne({ _id: userId }, { $inc: { used: -back, totalClips: -back } });
+      } });
+    } catch (e) {
+      await User.updateOne({ _id: userId }, { $inc: { used: -n, totalClips: -n } });
+      return res.status(e.status || 400).json({ error: e.message });
+    }
+    job.userId = userId;
+    res.json({ job: jobs.view(job), user: publicUser(u) });
+  } catch (e) { res.status(400).json({ error: e.message || 'No se pudo iniciar' }); }
+});
+
+function ownJob(req, res) {
+  const job = jobs.get(String(req.params.id));
+  if (!job || job.userId !== String(req.user._id)) { res.status(404).json({ error: 'Trabajo no encontrado' }); return null; }
+  return job;
+}
+app.get('/api/jobs/:id', auth, (req, res) => { const j = ownJob(req, res); if (j) res.json({ job: jobs.view(j) }); });
+app.get('/api/jobs/:id/clip/:n', auth, (req, res) => {
+  const j = ownJob(req, res); if (!j) return;
+  const f = jobs.clipPath(j, parseInt(req.params.n));
+  if (!f) return res.status(404).json({ error: 'Ese clip aún no está listo' });
+  res.type('video/mp4'); res.sendFile(f);
+});
+
+/* ---------- Recuperar contraseña ---------- */
+// Envía el código por correo con Resend (RESEND_API_KEY + MAIL_FROM). Sin eso, el dueño ve el código en su panel.
+async function sendMail(to, subject, text) {
+  if (!RESEND_API_KEY || !MAIL_FROM) return false;
+  const r = await fetch('https://api.resend.com/emails', {
+    method: 'POST', headers: { Authorization: 'Bearer ' + RESEND_API_KEY, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: MAIL_FROM, to, subject, text })
+  });
+  return r.ok;
+}
+app.post('/api/forgot', authLimit, async (req, res) => {
+  const email = clean(req.body.email).toLowerCase();
+  const u = await User.findOne({ email });
+  if (u) {
+    const code = String(crypto.randomInt(100000, 1000000));
+    u.resetHash = crypto.createHash('sha256').update(code).digest('hex');
+    u.resetExp = new Date(Date.now() + 15 * 60_000); u.resetTries = 0; await u.save();
+    const sent = await sendMail(email, 'Tu código de ClipMaker', `Tu código para cambiar la contraseña es ${code}. Vence en 15 minutos. Si no fuiste tú, ignora este mensaje.`).catch(() => false);
+    if (!sent) { u.resetCodeForOwner = code; await u.save(); }
+  }
+  res.json({ ok: true, msg: 'Si el correo existe, se envió un código. Si no te llega, pídeselo al administrador.' });
+});
+app.post('/api/reset', authLimit, async (req, res) => {
+  const email = clean(req.body.email).toLowerCase(), pass = String(req.body.password || '');
+  if (pass.length < 8) return res.status(400).json({ error: 'La contraseña debe tener mínimo 8 caracteres' });
+  const u = await User.findOne({ email });
+  const bad = () => res.status(400).json({ error: 'Código incorrecto o vencido' });
+  if (!u || !u.resetHash || !u.resetExp || u.resetExp < new Date() || u.resetTries >= 5) return bad();
+  const h = crypto.createHash('sha256').update(clean(req.body.code)).digest('hex');
+  if (!safeEq(h, u.resetHash)) { u.resetTries += 1; await u.save(); return bad(); }
+  u.hash = await bcrypt.hash(pass, 12);
+  u.resetHash = u.resetExp = u.resetCodeForOwner = undefined; u.resetTries = 0; await u.save();
+  res.json({ ok: true });
 });
 
 app.post('/api/payments', auth, async (req, res) => {
@@ -144,7 +227,7 @@ app.post('/api/owner/unlock', authLimit, auth, (req, res) => {
 
 app.get('/api/owner/summary', auth, ownerOnly, async (req, res) => {
   const [users, payments, wallets] = await Promise.all([
-    User.find({ email: { $ne: OWNER } }).select('-hash').sort('-createdAt'),
+    User.find({ email: { $ne: OWNER } }).select('-hash -resetHash').sort('-createdAt'),
     Payment.find().sort('-createdAt'), getWallets()
   ]);
   const all = await User.find();
