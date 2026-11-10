@@ -11,6 +11,13 @@ const DIR = process.env.CLIP_DIR || path.join(os.tmpdir(), 'clipmaker-jobs');
 const MAX_RUNNING = parseInt(process.env.MAX_JOBS) || 2;
 const KEEP_MS = 60 * 60 * 1000;           // los clips se borran 1 hora después
 const jobs = new Map();
+// Opcional: ayudas para plataformas que bloquean servidores (ver README en el chat)
+const YT_PROXY = process.env.YTDLP_PROXY || '';                 // ej. http://usuario:clave@host:puerto
+let COOKIES_FILE = '';
+if (process.env.YTDLP_COOKIES) {                                 // contenido de un cookies.txt (formato Netscape)
+  COOKIES_FILE = path.join(os.tmpdir(), 'cm-cookies.txt');
+  fs.writeFileSync(COOKIES_FILE, process.env.YTDLP_COOKIES.replace(/\\n/g, '\n'), { mode: 0o600 });
+}
 fs.mkdirSync(DIR, { recursive: true });
 
 /* ---------- Seguridad: solo direcciones públicas ---------- */
@@ -39,7 +46,8 @@ const DIRECT = /\.(mp4|webm|mov|m4v|m3u8|mkv)(\?|$)/i;
 function resolveMedia(url) {
   if (DIRECT.test(new URL(url).pathname + new URL(url).search)) return Promise.resolve(url);
   return new Promise((resolve, reject) => {
-    execFile('yt-dlp', ['-g', '--no-playlist', '--no-warnings', '-f', 'best[height<=720]/best', url],
+    execFile('yt-dlp', ['-g', '--no-playlist', '--no-warnings', '-f', 'best[height<=720]/best',
+      ...(YT_PROXY ? ['--proxy', YT_PROXY] : []), ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []), url],
       { timeout: 60000, maxBuffer: 1 << 20 }, (err, out, errOut) => {
         if (err) {
           if (err.code === 'ENOENT') return reject(new Error('El servidor no tiene yt-dlp instalado'));
@@ -146,6 +154,7 @@ function startJob({ url, duration, count, subtitles = true, vertical = false, on
       const total = duration * count;
       const args = ['-hide_banner', '-loglevel', 'error', '-nostdin',
         '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
+        ...(YT_PROXY && media !== url ? ['-http_proxy', YT_PROXY] : []),   // la URL de YouTube está atada a la IP que la pidió
         '-i', media, '-t', String(total),
         '-vf', 'scale=-2:min(720\\,ih)', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
         '-c:a', 'aac', '-b:a', '128k',
