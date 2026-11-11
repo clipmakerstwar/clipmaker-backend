@@ -43,19 +43,22 @@ async function assertPublicUrl(raw) {
 
 /* ---------- Obtener la dirección directa del video ---------- */
 const DIRECT = /\.(mp4|webm|mov|m4v|m3u8|mkv)(\?|$)/i;
+// Devuelve una lista de 1 o 2 direcciones: [video] o [video, audio] (YouTube separa el audio del video)
 function resolveMedia(url) {
-  if (DIRECT.test(new URL(url).pathname + new URL(url).search)) return Promise.resolve(url);
+  if (DIRECT.test(new URL(url).pathname + new URL(url).search)) return Promise.resolve([url]);
   return new Promise((resolve, reject) => {
-    execFile('yt-dlp', ['-g', '--no-playlist', '--no-warnings', '-f', 'best[height<=720]/best',
+    execFile('yt-dlp', ['-g', '--no-playlist', '--no-warnings',
+      '-f', 'bv*[height<=720]+ba/b[height<=720]/bv*+ba/b',
+      '--js-runtimes', 'node',                       // YouTube necesita ejecutar JavaScript para dar los formatos
       ...(YT_PROXY ? ['--proxy', YT_PROXY] : []), ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []), url],
-      { timeout: 60000, maxBuffer: 1 << 20 }, (err, out, errOut) => {
+      { timeout: 90000, maxBuffer: 1 << 20 }, (err, out, errOut) => {
         if (err) {
           if (err.code === 'ENOENT') return reject(new Error('El servidor no tiene yt-dlp instalado'));
           const msg = String(errOut || '').split('\n').find(l => l.includes('ERROR')) || 'No se pudo leer ese enlace (la red puede estar bloqueándolo)';
           return reject(new Error(msg.replace(/^ERROR:\s*/, '').slice(0, 200)));
         }
-        const first = out.split('\n').map(s => s.trim()).filter(Boolean)[0];
-        first ? resolve(first) : reject(new Error('No se encontró el video'));
+        const urls = out.split('\n').map(s => s.trim()).filter(l => /^https?:\/\//.test(l)).slice(0, 2);
+        urls.length ? resolve(urls) : reject(new Error('No se encontró el video'));
       });
   });
 }
@@ -154,8 +157,9 @@ function startJob({ url, duration, count, subtitles = true, vertical = false, on
       const total = duration * count;
       const args = ['-hide_banner', '-loglevel', 'error', '-nostdin',
         '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
-        ...(YT_PROXY && media !== url ? ['-http_proxy', YT_PROXY] : []),   // la URL de YouTube está atada a la IP que la pidió
-        '-i', media, '-t', String(total),
+        ...media.flatMap(m => [...(YT_PROXY && m !== url ? ['-http_proxy', YT_PROXY] : []), '-i', m]),
+        ...(media.length === 2 ? ['-map', '0:v:0', '-map', '1:a:0'] : []),
+        '-t', String(total),
         '-vf', 'scale=-2:min(720\\,ih)', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
         '-c:a', 'aac', '-b:a', '128k',
         '-force_key_frames', `expr:gte(t,n_forced*${duration})`,
