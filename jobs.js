@@ -46,11 +46,12 @@ const DIRECT = /\.(mp4|webm|mov|m4v|m3u8|mkv)(\?|$)/i;
 // Devuelve una lista de 1 o 2 direcciones: [video] o [video, audio] (YouTube separa el audio del video)
 const YT_ATTEMPTS = [          // se prueban en orden hasta que una funcione
   [],                                                     // normal
+  ['--remote-components', 'ejs:github'],                  // baja el resolvedor de desafíos de YouTube (código oficial de yt-dlp)
   ['--extractor-args', 'youtube:player_client=tv,web_safari'],
   ['--extractor-args', 'youtube:player_client=mweb'],
   ['--extractor-args', 'youtube:player_client=ios'],
 ];
-const baseArgs = () => ['--no-playlist', '--no-warnings', '--js-runtimes', 'node',
+const baseArgs = (quiet = true) => ['--no-playlist', ...(quiet ? ['--no-warnings'] : []), '--js-runtimes', 'node',
   ...(YT_PROXY ? ['--proxy', YT_PROXY] : []), ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : [])];
 const runYt = args => new Promise(resolve => execFile('yt-dlp', args, { timeout: 90000, maxBuffer: 4 << 20 },
   (err, out, errOut) => resolve({ err, out: String(out || ''), errOut: String(errOut || '') })));
@@ -71,8 +72,9 @@ async function resolveMedia(url) {
     if (/not a bot|Sign in to confirm/i.test(r.errOut)) break;     // otros clientes no arreglan este bloqueo
   }
   // Diagnóstico: deja en los logs de Render los formatos que YouTube sí muestra
-  const f = await runYt(['-F', ...baseArgs(), url]);
-  console.error('[yt-dlp] formatos disponibles:\n' + f.out.split('\n').slice(0, 40).join('\n') + '\n' + f.errOut.split('\n').slice(-5).join('\n'));
+  const f = await runYt(['-F', '-v', ...baseArgs(false), url]);
+  const keep = f.errOut.split('\n').filter(l => /WARNING|ERROR|challenge|runtime|PO Token|solver|ejs|n-sig|signature|Deno|node/i.test(l)).slice(0, 20);
+  console.error('[yt-dlp] diagnóstico:\n' + keep.join('\n') + '\n--- formatos:\n' + f.out.split('\n').slice(0, 25).join('\n'));
   const msg = String(last && last.errOut || '').split('\n').find(l => l.includes('ERROR')) || 'No se pudo leer ese enlace';
   throw new Error(msg.replace(/^ERROR:\s*/, '').slice(0, 200));
 }
