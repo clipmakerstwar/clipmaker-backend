@@ -46,12 +46,11 @@ const DIRECT = /\.(mp4|webm|mov|m4v|m3u8|mkv)(\?|$)/i;
 // Devuelve una lista de 1 o 2 direcciones: [video] o [video, audio] (YouTube separa el audio del video)
 const YT_ATTEMPTS = [          // se prueban en orden hasta que una funcione
   [],                                                     // normal
-  ['--remote-components', 'ejs:github'],                  // baja el resolvedor de desafíos de YouTube (código oficial de yt-dlp)
   ['--extractor-args', 'youtube:player_client=tv,web_safari'],
   ['--extractor-args', 'youtube:player_client=mweb'],
   ['--extractor-args', 'youtube:player_client=ios'],
 ];
-const baseArgs = (quiet = true) => ['--no-playlist', ...(quiet ? ['--no-warnings'] : []), '--js-runtimes', 'node',
+const baseArgs = (quiet = true) => ['--no-playlist', ...(quiet ? ['--no-warnings'] : []), '--js-runtimes', 'deno',
   ...(YT_PROXY ? ['--proxy', YT_PROXY] : []), ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : [])];
 const runYt = args => new Promise(resolve => execFile('yt-dlp', args, { timeout: 90000, maxBuffer: 4 << 20 },
   (err, out, errOut) => resolve({ err, out: String(out || ''), errOut: String(errOut || '') })));
