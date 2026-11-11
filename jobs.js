@@ -44,23 +44,37 @@ async function assertPublicUrl(raw) {
 /* ---------- Obtener la dirección directa del video ---------- */
 const DIRECT = /\.(mp4|webm|mov|m4v|m3u8|mkv)(\?|$)/i;
 // Devuelve una lista de 1 o 2 direcciones: [video] o [video, audio] (YouTube separa el audio del video)
-function resolveMedia(url) {
-  if (DIRECT.test(new URL(url).pathname + new URL(url).search)) return Promise.resolve([url]);
-  return new Promise((resolve, reject) => {
-    execFile('yt-dlp', ['-g', '--no-playlist', '--no-warnings',
-      '-f', 'bv*[height<=720]+ba/b[height<=720]/bv*+ba/b',
-      '--js-runtimes', 'node',                       // YouTube necesita ejecutar JavaScript para dar los formatos
-      ...(YT_PROXY ? ['--proxy', YT_PROXY] : []), ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : []), url],
-      { timeout: 90000, maxBuffer: 1 << 20 }, (err, out, errOut) => {
-        if (err) {
-          if (err.code === 'ENOENT') return reject(new Error('El servidor no tiene yt-dlp instalado'));
-          const msg = String(errOut || '').split('\n').find(l => l.includes('ERROR')) || 'No se pudo leer ese enlace (la red puede estar bloqueándolo)';
-          return reject(new Error(msg.replace(/^ERROR:\s*/, '').slice(0, 200)));
-        }
-        const urls = out.split('\n').map(s => s.trim()).filter(l => /^https?:\/\//.test(l)).slice(0, 2);
-        urls.length ? resolve(urls) : reject(new Error('No se encontró el video'));
-      });
-  });
+const YT_ATTEMPTS = [          // se prueban en orden hasta que una funcione
+  [],                                                     // normal
+  ['--extractor-args', 'youtube:player_client=tv,web_safari'],
+  ['--extractor-args', 'youtube:player_client=mweb'],
+  ['--extractor-args', 'youtube:player_client=ios'],
+];
+const baseArgs = () => ['--no-playlist', '--no-warnings', '--js-runtimes', 'node',
+  ...(YT_PROXY ? ['--proxy', YT_PROXY] : []), ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : [])];
+const runYt = args => new Promise(resolve => execFile('yt-dlp', args, { timeout: 90000, maxBuffer: 4 << 20 },
+  (err, out, errOut) => resolve({ err, out: String(out || ''), errOut: String(errOut || '') })));
+
+async function resolveMedia(url) {
+  if (DIRECT.test(new URL(url).pathname + new URL(url).search)) return [url];
+  let last = null;
+  for (const extra of YT_ATTEMPTS) {
+    // -S res:720 prefiere 720p o menos, pero no falla si no existe ese tamaño
+    const r = await runYt(['-g', '-f', 'bv*+ba/b', '-S', 'res:720', ...baseArgs(), ...extra, url]);
+    if (r.err && r.err.code === 'ENOENT') throw new Error('El servidor no tiene yt-dlp instalado');
+    if (!r.err) {
+      const urls = r.out.split('\n').map(x => x.trim()).filter(l => /^https?:\/\//.test(l)).slice(0, 2);
+      if (urls.length) return urls;
+    }
+    last = r;
+    console.error('[yt-dlp] intento fallido', JSON.stringify(extra), '->', r.errOut.split('\n').filter(Boolean).slice(-3).join(' | '));
+    if (/not a bot|Sign in to confirm/i.test(r.errOut)) break;     // otros clientes no arreglan este bloqueo
+  }
+  // Diagnóstico: deja en los logs de Render los formatos que YouTube sí muestra
+  const f = await runYt(['-F', ...baseArgs(), url]);
+  console.error('[yt-dlp] formatos disponibles:\n' + f.out.split('\n').slice(0, 40).join('\n') + '\n' + f.errOut.split('\n').slice(-5).join('\n'));
+  const msg = String(last && last.errOut || '').split('\n').find(l => l.includes('ERROR')) || 'No se pudo leer ese enlace';
+  throw new Error(msg.replace(/^ERROR:\s*/, '').slice(0, 200));
 }
 
 /* ---------- Subtítulos (transcripción con Whisper de OpenAI) ---------- */
