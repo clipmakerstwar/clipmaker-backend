@@ -63,7 +63,7 @@ const app = express();
 app.set('trust proxy', 1);
 app.use(helmet());
 app.use(cors({ origin: ALLOWED_ORIGIN ? ALLOWED_ORIGIN.split(',').map(s => s.trim()) : false }));
-app.use(express.json({ limit: '20kb' }));
+app.use(express.json({ limit: '60kb' }));
 app.use('/api/', rateLimit({ windowMs: 60_000, max: 120 }));
 const authLimit = rateLimit({ windowMs: 15 * 60_000, max: 10, message: { error: 'Demasiados intentos. Espera 15 minutos.' } });
 
@@ -171,6 +171,24 @@ app.get('/api/jobs/:id/clip/:n', auth, (req, res) => {
   const f = jobs.clipPath(j, parseInt(req.params.n));
   if (!f) return res.status(404).json({ error: 'Ese clip aún no está listo' });
   res.type('video/mp4'); res.sendFile(f);
+});
+
+app.get('/api/jobs/:id/clip/:n/source', auth, (req, res) => {
+  const j = ownJob(req, res); if (!j) return;
+  const f = jobs.sourcePath(j, parseInt(req.params.n));
+  if (!f) return res.status(404).json({ error: 'Ese clip aún no está listo' });
+  res.type('video/mp4'); res.sendFile(f);
+});
+app.get('/api/jobs/:id/clip/:n/info', auth, async (req, res) => {
+  const j = ownJob(req, res); if (!j) return;
+  const i = await jobs.clipInfo(j, parseInt(req.params.n));
+  i ? res.json(i) : res.status(404).json({ error: 'Ese clip aún no está listo' });
+});
+const editLimit = rateLimit({ windowMs: 60 * 60_000, max: 60, message: { error: 'Demasiadas ediciones. Intenta más tarde.' } });
+app.post('/api/jobs/:id/clip/:n/edit', auth, editLimit, async (req, res) => {
+  const j = ownJob(req, res); if (!j) return;
+  try { res.json(await jobs.editClip(j, parseInt(req.params.n), req.body || {})); }
+  catch (e) { res.status(e.status || 400).json({ error: e.message || 'No se pudo editar' }); }
 });
 
 /* ---------- Recuperar contraseña ---------- */
