@@ -154,9 +154,10 @@ async function probeInfo(url, media) {
         { timeout: 30000 }, (e, out) => res(e ? 0 : parseFloat(String(out).trim()) || 0)));
       return { live: false, duration: d };
     }
-    const r = await runYt(['--print', '%(is_live)s|%(duration)s', ...baseArgs(), url]);
-    if (r.err) return { live: false, duration: 0 };
-    const [live, dur] = r.out.trim().split('\\n').pop().split('|');
+    const r = await runYt(['--print', '%(is_live)s|%(duration)s|%(height)s|%(format_id)s|%(vcodec)s', '-f', 'bv*+ba/b', '-S', 'res:720', ...baseArgs(), url]);
+    if (r.err) { console.error('[job] no se pudo medir la duración:', r.errOut.split('\n').filter(Boolean).slice(-2).join(' | ')); return { live: false, duration: 0 }; }
+    const [live, dur, h, fid, vc] = r.out.trim().split('\n').pop().split('|');
+    console.log(`[job] video: live=${live} duración=${dur}s alto=${h}p formato=${fid} codec=${vc}`);
     return { live: live === 'True', duration: parseFloat(dur) || 0 };
   } catch { return { live: false, duration: 0 }; }
 }
@@ -258,9 +259,11 @@ function startJob({ url, duration, count, subtitles = true, vertical = false, on
       job.status = 'running';
       const total = duration * count;
       const info = await probeInfo(url, media);
+      if (!(!info.live && info.duration > total * 1.15)) console.log('[job] modo seguido (no repartido): live=' + info.live + ' duración=' + info.duration + ' necesario>' + Math.round(total * 1.15));
       if (!info.live && info.duration > total * 1.15) {
         // Video grabado y largo: un clip de cada zona del video, no los primeros segundos seguidos
         job.spread = true;
+        console.log('[job] modo repartido: inicios =', Array.from({ length: count }, (_, i) => Math.round(Math.max(0, Math.min(info.duration * (i + 0.5) / count - duration / 2, info.duration - duration)))).join(', '), 's');
         for (let i = 0; i < count && !ended; i++) {
           const center = info.duration * (i + 0.5) / count;
           const start = Math.max(0, Math.min(center - duration / 2, info.duration - duration));
