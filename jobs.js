@@ -11,6 +11,10 @@ const DIR = process.env.CLIP_DIR || path.join(os.tmpdir(), 'clipmaker-jobs');
 const MAX_RUNNING = parseInt(process.env.MAX_JOBS) || 2;
 const KEEP_MS = 60 * 60 * 1000;           // los clips se borran 1 hora después
 const jobs = new Map();
+// Ajustes de codificación para servidores con poca memoria/CPU (se cambian con variables de entorno)
+const ENC_PRESET = process.env.ENC_PRESET || 'veryfast';          // en el plan Free usa: ultrafast
+const ENC_THREADS = process.env.ENC_THREADS || '0';               // en el plan Free usa: 1
+const ENC = ['-preset', ENC_PRESET, '-threads', ENC_THREADS];
 // Opcional: ayudas para plataformas que bloquean servidores (ver README en el chat)
 const YT_PROXY = process.env.YTDLP_PROXY || '';                 // ej. http://usuario:clave@host:puerto
 let COOKIES_FILE = '';
@@ -131,7 +135,7 @@ async function finalize(job, i, rawName) {
     } catch (e) { job.warn = 'Algunos clips salieron sin subtítulos (' + e.message + ').'; }
   } else if (job.subtitles) job.warn = 'Subtítulos no disponibles en este servidor (falta OPENAI_API_KEY).';
   const args = ['-i', 'raw/' + rawName];
-  if (filters.length) args.push('-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '26', '-c:a', 'copy');
+  if (filters.length) args.push('-vf', filters.join(','), '-c:v', 'libx264', ...ENC, '-crf', '26', '-c:a', 'copy');
   else args.push('-c', 'copy');
   args.push('-movflags', '+faststart', out);
   await ff(args, job.dir);
@@ -162,7 +166,7 @@ function cutArgs(media, url, start, len, outPath) {
     '-protocol_whitelist', 'file,http,https,tcp,tls,crypto',
     ...media.flatMap(m => [...(YT_PROXY && m !== url ? ['-http_proxy', YT_PROXY] : []), ...(start > 0 ? ['-ss', String(Math.round(start))] : []), '-i', m]),
     ...(media.length === 2 ? ['-map', '0:v:0', '-map', '1:a:0'] : []),
-    '-t', String(len), '-vf', vfScale, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-c:a', 'aac', '-b:a', '128k', outPath];
+    '-t', String(len), '-vf', vfScale, '-c:v', 'libx264', ...ENC, '-crf', '24', '-c:a', 'aac', '-b:a', '128k', outPath];
 }
 
 /* ---------- Editor de clips: recorta, mueve el encuadre y corrige subtítulos ---------- */
@@ -213,8 +217,8 @@ async function editClip(job, n, o) {
       filters.push(`subtitles=${f}:force_style='FontName=DejaVu Sans,Bold=1,FontSize=${size},PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BorderStyle=1,Outline=2.5,Shadow=0,Alignment=2,MarginV=${mv}'`);
     }
     const args = ['-ss', String(a), '-to', String(b), '-i', 'raw/' + m.raw];
-    if (filters.length) args.push('-vf', filters.join(','), '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-c:a', 'aac', '-b:a', '128k');
-    else args.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24', '-c:a', 'aac', '-b:a', '128k');
+    if (filters.length) args.push('-vf', filters.join(','), '-c:v', 'libx264', ...ENC, '-crf', '24', '-c:a', 'aac', '-b:a', '128k');
+    else args.push('-c:v', 'libx264', ...ENC, '-crf', '24', '-c:a', 'aac', '-b:a', '128k');
     args.push('-movflags', '+faststart', out);
     await ff(args, job.dir);
     job.finals[n] = out;
@@ -279,7 +283,7 @@ function startJob({ url, duration, count, subtitles = true, vertical = false, on
         ...media.flatMap(m => [...(YT_PROXY && m !== url ? ['-http_proxy', YT_PROXY] : []), '-i', m]),
         ...(media.length === 2 ? ['-map', '0:v:0', '-map', '1:a:0'] : []),
         '-t', String(total),
-        '-vf', vfScale, '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '24',
+        '-vf', vfScale, '-c:v', 'libx264', ...ENC, '-crf', '24',
         '-c:a', 'aac', '-b:a', '128k',
         '-force_key_frames', `expr:gte(t,n_forced*${duration})`,
         '-f', 'segment', '-segment_time', String(duration), '-reset_timestamps', '1',
