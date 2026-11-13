@@ -54,7 +54,9 @@ const YT_ATTEMPTS = [          // se prueban en orden hasta que una funcione
   ['--extractor-args', 'youtube:player_client=mweb'],
   ['--extractor-args', 'youtube:player_client=ios'],
 ];
+const YT_EXTRA = (process.env.YT_EXTRA_ARGS || '').split(/\s+/).filter(Boolean);   // experimentos: ej. --extractor-args youtube:player_client=web_safari
 const baseArgs = (quiet = true) => ['--no-playlist', ...(quiet ? ['--no-warnings'] : []), '--js-runtimes', 'deno',
+  ...YT_EXTRA,
   ...(YT_PROXY ? ['--proxy', YT_PROXY] : []), ...(COOKIES_FILE ? ['--cookies', COOKIES_FILE] : [])];
 const runYt = args => new Promise(resolve => execFile('yt-dlp', args, { timeout: 90000, maxBuffer: 4 << 20 },
   (err, out, errOut) => resolve({ err, out: String(out || ''), errOut: String(errOut || '') })));
